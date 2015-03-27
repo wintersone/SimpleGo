@@ -46,14 +46,6 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "Welcome Ha Ha Ha Ha!")
 }
 
-func aboutHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "About your ass ")
-}
-
-func panicHandler(w http.ResponseWriter, r *http.Request) {
-	panic("I'm still panicing, ha ha")
-}
-
 func loggingHandler(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request){
 		t1 := time.Now()
