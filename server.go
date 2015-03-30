@@ -1,29 +1,35 @@
 package main
 
 import (
-	"net/http"
-	"fmt"
-	"time"
+	"encoding/json"
 	"log"
-	"github.com/justinas/alice"
+	"net/http"
+	"reflect"
+	"time"
+
+	"github.com/garyburd/redigo/redis"
 	"github.com/gorilla/context"
 	"github.com/julienschmidt/httprouter"
-	"encoding/json"
-	"reflect"
-	"github.com/garyburd/redigo/redis"
+	"github.com/justinas/alice"
+	"github.com/unrolled/render"
 )
 
-
 //Errors
+
+var (
+	tmplRender = render.New(render.Options{
+		IsDevelopment: true,
+	})
+)
 
 type Errors struct {
 	Errors []*Error `json:"errors"`
 }
 
 type Error struct {
-	Id string `json:"id"`
-	Status int `json:"status"`
-	Title string `json:"title"`
+	Id     string `json:"id"`
+	Status int    `json:"status"`
+	Title  string `json:"title"`
 	Detail string `json:"detail"`
 }
 
@@ -38,16 +44,17 @@ var (
 	ErrNotAcceptable        = &Error{"not_acceptable", 406, "Not Acceptable", "Accept header must be set to 'application/json'."}
 	ErrUnsupportedMediaType = &Error{"unsupported_media_type", 415, "Unsupported Media Type", "Content-Type header must be set to: 'application/json'."}
 	ErrInternalServer       = &Error{"internal_server_error", 500, "Internal Server Error", "Something went wrong."}
+	ErrNotFound             = &Error{"not_found", 404, "Not Found", "Not Found."}
 )
 
-
-//middle 
+//middle
 func indexHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "Welcome Ha Ha Ha Ha!")
+
+	tmplRender.HTML(w, http.StatusOK, "welcome", nil)
 }
 
 func loggingHandler(next http.Handler) http.Handler {
-	fn := func(w http.ResponseWriter, r *http.Request){
+	fn := func(w http.ResponseWriter, r *http.Request) {
 		t1 := time.Now()
 		next.ServeHTTP(w, r)
 		t2 := time.Now()
@@ -58,9 +65,9 @@ func loggingHandler(next http.Handler) http.Handler {
 }
 
 func recoverHandler(next http.Handler) http.Handler {
-	fn := func(w http.ResponseWriter, r *http.Request){
-		defer func(){
-			if err := recover(); err != nil  {
+	fn := func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
 				log.Printf("panic: %+v", err)
 				http.Error(w, http.StatusText(500), 500)
 			}
@@ -70,6 +77,38 @@ func recoverHandler(next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(fn)
+}
+
+type Static struct {
+	Dir http.FileSystem
+}
+
+func (s *Static) saticHandler(w http.ResponseWriter, r *http.Request) {
+
+	if r.Method != "GET" && r.Method != "HEAD" {
+		WriteError(w, ErrNotFound)
+	}
+
+	log.Printf("path is %s", r.URL.Path)
+
+	file := r.URL.Path
+	f, err := s.Dir.Open(file)
+	if err != nil {
+		// discard the error?
+		log.Printf("error is %s", err)
+		WriteError(w, ErrNotFound)
+		return
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		WriteError(w, ErrNotFound)
+		return
+	}
+
+	http.ServeContent(w, r, file, fi.ModTime(), f)
+
 }
 
 func acceptHandler(next http.Handler) http.Handler {
@@ -98,7 +137,6 @@ func contentTypeHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(fn)
 }
 
-
 func bodyHandler(v interface{}) func(http.Handler) http.Handler {
 
 	t := reflect.TypeOf(v)
@@ -117,7 +155,7 @@ func bodyHandler(v interface{}) func(http.Handler) http.Handler {
 				context.Set(r, "body", val)
 				next.ServeHTTP(w, r)
 			}
-			
+
 		}
 
 		return http.HandlerFunc(fn)
@@ -125,18 +163,18 @@ func bodyHandler(v interface{}) func(http.Handler) http.Handler {
 
 	return m
 }
+
 // Repo
 
 type Response struct {
-	
 	Status string `json:"status"`
-	
+
 	Content interface{} `json:"content"`
 }
 
 type Tea struct {
-	Name string      `redis:"name"`
-	Category string  `redis:"category"`
+	Name     string `redis:"name"`
+	Category string `redis:"category"`
 }
 
 type TeaCollection struct {
@@ -147,35 +185,34 @@ type TeaResource struct {
 	Data Tea `json:"data"`
 }
 
-
 // Main Handlers
 type appContext struct {
 	conn redis.Conn
 }
 
-func (c *appContext)teaHandler(w http.ResponseWriter, r *http.Request) {
+func (c *appContext) teaHandler(w http.ResponseWriter, r *http.Request) {
 
 	params := context.Get(r, "params").(httprouter.Params)
 	id := params.ByName("id")
-	tableName := "tea:"+id
+	tableName := "tea:" + id
 
-	v,_ := redis.StringMap(c.conn.Do("HGETALL", tableName))
-	
-	strB,_ := json.Marshal(v)
-	
+	v, _ := redis.StringMap(c.conn.Do("HGETALL", tableName))
+
+	strB, _ := json.Marshal(v)
+
 	tea := Tea{}
-	
+
 	json.Unmarshal([]byte(strB), &tea)
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(tea)
 }
 
-func (c *appContext)createTeaHandler(w http.ResponseWriter, r *http.Request) {
+func (c *appContext) createTeaHandler(w http.ResponseWriter, r *http.Request) {
 
 	body := context.Get(r, "body").(*TeaResource)
 	tableName := "tea:2"
-	_,err := c.conn.Do("HMSET",redis.Args{}.Add(tableName).AddFlat(&body.Data)...)
+	_, err := c.conn.Do("HMSET", redis.Args{}.Add(tableName).AddFlat(&body.Data)...)
 
 	if err != nil {
 		panic(err)
@@ -196,6 +233,10 @@ func (r *router) Get(path string, handler http.Handler) {
 
 func (r *router) Post(path string, handler http.Handler) {
 	r.POST(path, wrapHandler(handler))
+}
+
+func (r *router) Handle(path string, handler http.Handler) {
+	r.Handle(path, handler)
 }
 
 func NewRouter() *router {
@@ -219,13 +260,15 @@ func main() {
 
 	defer redisConn.Close()
 
-	appC := appContext{redisConn}
+	//	appC := appContext{redisConn}
 
-	commonHandler := alice.New(context.ClearHandler,loggingHandler,recoverHandler,acceptHandler)
+	satic := Static{http.Dir("public")}
+
+	commonHandler := alice.New(context.ClearHandler, loggingHandler, recoverHandler)
+
 	router := NewRouter()
+	router.NotFound = satic.saticHandler
 
-	router.Get("/teas/:id", commonHandler.ThenFunc(appC.teaHandler))
-	router.Post("/teas", commonHandler.Append(contentTypeHandler, bodyHandler(TeaResource{})).ThenFunc(appC.createTeaHandler))
-	
+	router.Get("/", commonHandler.ThenFunc(indexHandler))
 	http.ListenAndServe(":8000", router)
 }
