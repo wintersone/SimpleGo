@@ -3,125 +3,94 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log"
-
+	"strconv"
 	"strings"
 	"time"
-
-	"strconv"
 
 	"github.com/garyburd/redigo/redis"
 )
 
 type DBHelper struct {
-	conn redis.Conn
+	err error
 }
 
-func (helper *DBHelper) userFromAuth(auth string) (*User, error) {
+func (helper *DBHelper) userFromAuth(auth string) *User {
 
 	if auth == "" {
-		return nil, errors.New("No Authentication")
+		helper.err = errors.New("No Authentication")
+		return nil
 	}
 
-	userId, err := redis.String(helper.conn.Do("HGET", "auths", auth))
+	var userId, authSaved string
+	userId, helper.err = redis.String(redisConn.Do("HGET", "auths", auth))
 
-	if err != nil {
-		return nil, err
-	}
-
-	authSaved, err := redis.String(helper.conn.Do("HGET", "user:"+userId, "auth"))
-	if err != nil {
-		return nil, err
-	}
+	authSaved, helper.err = redis.String(redisConn.Do("HGET", "user:"+userId, "auth"))
 
 	if authSaved != auth {
-		return nil, errors.New("")
+		helper.err = errors.New("invalid auth")
+		return nil
 	}
 
 	return helper.loadUserInfo(userId)
 }
 
-func (helper *DBHelper) loadUserInfo(userId string) (*User, error) {
-
-	v, err := redis.Values(helper.conn.Do("HGETALL", "user:"+userId))
-
-	if err != nil {
-		return nil, err
-	}
-
+func (helper *DBHelper) loadUserInfo(userId string) *User {
+	var value []interface{}
+	value, helper.err = redis.Values(redisConn.Do("HGETALL", "user:"+userId))
 	user := &User{}
-
-	err = redis.ScanStruct(v, user)
-
-	log.Printf("userName is %s", user.UserName)
-
-	if err != nil {
-		return nil, err
+	helper.err = redis.ScanStruct(value, user)
+	if helper.err != nil {
+		return nil
 	}
-
-	return user, nil
+	return user
 }
 
-func (helper *DBHelper) getUserFromName(userName string) (*User, error) {
+func (helper *DBHelper) getUserFromName(userName string) *User {
 
-	value, err := redis.String(helper.conn.Do("HGET", "users", userName))
-
-	if err != nil {
-		return nil, err
-	}
+	var value string
+	value, helper.err = redis.String(redisConn.Do("HGET", "users", userName))
 
 	return helper.loadUserInfo(value)
 }
 
-func (helper *DBHelper) getPost(postId string) (*Post, error) {
+func (helper *DBHelper) getPost(postId string) *Post {
 
-	v, err := redis.Values(helper.conn.Do("HGETALL", "post:"+postId))
-	if err != nil {
-		return nil, err
-	}
-
+	var values []interface{}
+	values, helper.err = redis.Values(redisConn.Do("HGETALL", "post:"+postId))
 	post := &Post{}
+	helper.err = redis.ScanStruct(values, post)
 
-	err = redis.ScanStruct(v, post)
-
-	if err != nil {
-		return nil, err
-	}
-
-	userName, err := redis.String(helper.conn.Do("hget", "user:"+post.UserId, "userName"))
-	post.UserName = userName
-	return post, nil
+	post.UserName, helper.err = redis.String(redisConn.Do("hget", "user:"+post.UserId, "userName"))
+	return post
 }
 
-func (helper *DBHelper) getUserPosts(userId string, start int64, count int64) ([]*Post, int64, error) {
-	values, err := redis.Strings(helper.conn.Do("LRANGE", "posts:"+userId, start, start+count-1))
+func (helper *DBHelper) getUserPosts(userId string, start int64, count int64) ([]*Post, int64) {
+	var (
+		values []string
+		length int64
+	)
+	values, helper.err = redis.Strings(redisConn.Do("LRANGE", "posts:"+userId, start, start+count-1))
 	posts := []*Post{}
 
 	for _, postId := range values {
-		post, err := helper.getPost(postId)
-
+		post := helper.getPost(postId)
 		post.Time = strElapsed(post.Time)
-
-		if err != nil {
-			return nil, 0, err
-		} else {
-			posts = append(posts, post)
-		}
+		posts = append(posts, post)
 	}
 
-	length, err := redis.Int64(helper.conn.Do("LLEN", "posts:"+userId))
+	length, helper.err = redis.Int64(redisConn.Do("LLEN", "posts:"+userId))
 
-	if err != nil {
-		return posts, 0, err
+	if helper.err != nil {
+		return posts, 0
 	} else {
-		return posts, length - start - int64(len(values)), nil
+		return posts, length - start - int64(len(values))
 	}
 }
 
 func (helper *DBHelper) getFollowers(userId string) int {
-	count, err := redis.Int(helper.conn.Do("ZCARD", "followers:"+userId))
-
-	if err != nil {
+	var count int
+	count, helper.err = redis.Int(redisConn.Do("ZCARD", "followers:"+userId))
+	if helper.err != nil {
 		return 0
 	} else {
 		return count
@@ -130,9 +99,10 @@ func (helper *DBHelper) getFollowers(userId string) int {
 }
 
 func (helper *DBHelper) getFollowing(userId string) int {
-	count, err := redis.Int(helper.conn.Do("ZCARD", "following:"+userId))
+	var count int
+	count, helper.err = redis.Int(redisConn.Do("ZCARD", "following:"+userId))
 
-	if err != nil {
+	if helper.err != nil {
 		return 0
 	} else {
 		return count
@@ -140,94 +110,62 @@ func (helper *DBHelper) getFollowing(userId string) int {
 
 }
 
-func (helper *DBHelper) post(userId string, body string) error {
-
+func (helper *DBHelper) post(userId string, body string) {
+	var (
+		postId    int
+		userName  string
+		followers []string
+	)
 	body = strings.Replace(body, "\n", " ", -1)
-	postId, err := redis.Int(helper.conn.Do("INCR", "next_post_id"))
-	if err != nil {
-		return err
-	}
-
-	userName, err := redis.String(helper.conn.Do("hget", "user:"+userId, "userName"))
-
-	if err != nil {
-		return err
-	}
-
+	postId, helper.err = redis.Int(redisConn.Do("INCR", "next_post_id"))
+	userName, helper.err = redis.String(redisConn.Do("hget", "user:"+userId, "userName"))
 	post := Post{userId, strconv.FormatInt(time.Now().Unix(), 10), body, userName}
 	tableName := "post:" + strconv.Itoa(postId)
-
-	_, err = helper.conn.Do("HMSET", redis.Args{}.Add(tableName).AddFlat(&post)...)
-
-	if err != nil {
-		return err
-	}
-
-	followers, err := redis.Strings(helper.conn.Do("ZRANGE", "followers:"+userId, 0, -1))
-	if err != nil {
-		return err
-	}
-
+	_, helper.err = redisConn.Do("HMSET", redis.Args{}.Add(tableName).AddFlat(&post)...)
+	followers, helper.err = redis.Strings(redisConn.Do("ZRANGE", "followers:"+userId, 0, -1))
 	followers = append(followers, userId)
 
 	for _, followerID := range followers {
-		_, err = helper.conn.Do("LPUSH", "posts:"+followerID, postId)
-		if err != nil {
-			return err
-		}
-
+		_, helper.err = redisConn.Do("LPUSH", "posts:"+followerID, postId)
 	}
-
-	_, err = helper.conn.Do("LPUSH", "timeline", postId)
-	if err != nil {
-		return err
-	}
-
-	_, err = helper.conn.Do("LTRIM", "timeline", 0, 2000)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	_, helper.err = redisConn.Do("LPUSH", "timeline", postId)
+	_, helper.err = redisConn.Do("LTRIM", "timeline", 0, 2000)
 }
 
-func (helper *DBHelper) getLatestUsers() ([]*User, error) {
-	v, err := redis.Strings(helper.conn.Do("ZREVRANGE", "users_by_time", 0, 9))
-	if err != nil {
-		return nil, err
-	}
+func (helper *DBHelper) getLatestUsers() []*User {
+	var (
+		values []string
+		users  = []*User{}
+	)
+	values, helper.err = redis.Strings(redisConn.Do("ZREVRANGE", "users_by_time", 0, 9))
 
-	users := []*User{}
-
-	for _, userName := range v {
+	for _, userName := range values {
 		users = append(users, &User{UserName: userName})
 	}
 
-	return users, nil
+	return users
 }
-func (helper *DBHelper) getLatestTimeLine(start int64, count int64) ([]*Post, int64, error) {
-
-	values, err := redis.Strings(helper.conn.Do("LRANGE", "timeline", start, start+count-1))
-	posts := []*Post{}
+func (helper *DBHelper) getLatestTimeLine(start int64, count int64) ([]*Post, int64) {
+	var (
+		values []string
+		posts  = []*Post{}
+		length int64
+	)
+	values, helper.err = redis.Strings(redisConn.Do("LRANGE", "timeline", start, start+count-1))
 
 	for _, postId := range values {
-		post, err := helper.getPost(postId)
+		post := helper.getPost(postId)
 
 		post.Time = strElapsed(post.Time)
-
-		if err != nil {
-			return nil, 0, err
-		} else {
-			posts = append(posts, post)
-		}
+		posts = append(posts, post)
 	}
 
-	length, err := redis.Int64(helper.conn.Do("LLEN", "timeline"))
+	length, helper.err = redis.Int64(redisConn.Do("LLEN", "timeline"))
 
-	if err != nil {
-		return posts, 0, err
+	if helper.err != nil {
+		return posts, 0
 	} else {
-		return posts, length - start - int64(len(values)), nil
+		return posts, length - start - int64(len(values))
 	}
 }
 

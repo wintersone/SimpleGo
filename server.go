@@ -24,8 +24,6 @@ var (
 	tmplRender = render.New(render.Options{
 		IsDevelopment: true,
 	})
-
-	redisConn redis.Conn
 )
 
 type Errors struct {
@@ -61,27 +59,6 @@ func Goback(w http.ResponseWriter, r *http.Request, err error) {
 	tmplRender.HTML(w, http.StatusOK, "error", templateParams)
 }
 
-//middle
-func indexHandler(w http.ResponseWriter, r *http.Request) {
-
-	tmplRender.HTML(w, http.StatusOK, "welcome", nil)
-}
-
-func registerHandler(w http.ResponseWriter, r *http.Request) {
-	userName := r.PostFormValue("username")
-	password := r.PostFormValue("password")
-	passwordVerify := r.PostFormValue("password2")
-
-	if userName == "" || password == "" || passwordVerify == "" {
-		Goback(w, r, errors.New("Every field of the registration form is needed!"))
-	}
-
-	if password != passwordVerify {
-		Goback(w, r, errors.New("The two password fileds don't match!"))
-	}
-
-}
-
 func loggingHandler(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request) {
 		t1 := time.Now()
@@ -108,13 +85,16 @@ func recoverHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(fn)
 }
 
-func acceptHandler(next http.Handler) http.Handler {
+func authHandler(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Accept") != "application/json" {
-			WriteError(w, ErrBadRequest)
-			return
+		helper := DBHelper{}
+		auth := getAuth(r)
+		user := helper.userFromAuth(auth)
+		if helper.err == nil {
+			log.Printf("user is %@", user.UserName)
+			context.Set(r, "user", user)
 		}
-
+		log.Printf("error is %@", helper.err)
 		next.ServeHTTP(w, r)
 	}
 
@@ -168,99 +148,6 @@ type Response struct {
 	Content interface{} `json:"content"`
 }
 
-type User struct {
-	UserId   string `redis:"userId"`
-	UserName string `redis:"userName"`
-	Password string `redis:"password"`
-	Auth     string `redis:"auth"`
-}
-
-func (u *User) IsEqual(user *User) bool {
-	if u == nil || user == nil {
-		return false
-	}
-
-	if u.UserId == user.UserId {
-		return true
-	}
-
-	return false
-}
-
-func (u *User) IsFollowing(user *User) bool {
-	v, err := redis.Int(redisConn.Do("ZSCORE", "following:"+u.UserId, user.UserId))
-	if err != nil {
-		return false
-	}
-
-	if v > 0 {
-		return true
-	} else {
-		return false
-	}
-}
-
-func (u *User) GetFollowers() int {
-
-	if u == nil {
-		log.Printf("nil user")
-	}
-	if redisConn == nil {
-		log.Printf("nil redis")
-	}
-	count, err := redis.Int(redisConn.Do("ZCARD", "followers:"+u.UserId))
-
-	if err != nil {
-		log.Printf("error follower is %s", err)
-		return 0
-	} else {
-		return count
-	}
-
-}
-
-func (u *User) GetFollowing() int {
-	count, err := redis.Int(redisConn.Do("ZCARD", "following:"+u.UserId))
-
-	if err != nil {
-		log.Printf("error following is %s", err)
-		return 0
-	} else {
-		return count
-	}
-}
-
-func (u *User) Follow(user *User) error {
-
-	_, err := redisConn.Do("ZADD", "following:"+u.UserId, time.Now().Unix(), user.UserId)
-
-	if err != nil {
-		return err
-	}
-
-	_, err = redisConn.Do("ZADD", "followers:"+user.UserId, time.Now().Unix(), u.UserId)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (u *User) UnFollow(user *User) error {
-
-	_, err := redisConn.Do("ZREM", "following:"+u.UserId, user.UserId)
-
-	if err != nil {
-		return err
-	}
-	_, err = redisConn.Do("ZREM", "followers:"+user.UserId, u.UserId)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
 type Post struct {
 	UserId   string `redis:"userId"`
 	Time     string `redis:"time"`
@@ -269,14 +156,11 @@ type Post struct {
 }
 
 // Main Handlers
-type appContext struct {
-	conn   redis.Conn
-	helper DBHelper
-}
 
-func (c *appContext) registerHandler(w http.ResponseWriter, r *http.Request) {
+func registerHandler(w http.ResponseWriter, r *http.Request) {
 	userName := r.PostFormValue("username")
 	password := r.PostFormValue("password")
+
 	passwordVerify := r.PostFormValue("password2")
 
 	if userName == "" || password == "" || passwordVerify == "" {
@@ -288,8 +172,13 @@ func (c *appContext) registerHandler(w http.ResponseWriter, r *http.Request) {
 		Goback(w, r, errors.New("The two password fileds don't match!"))
 		return
 	}
+	password, err := encryptedPassword(r.PostFormValue("password"))
+	if err != nil {
+		Goback(w, r, err)
+		return
+	}
 
-	userExistId, err := c.conn.Do("HGET", "users", userName)
+	userExistId, err := redisConn.Do("HGET", "users", userName)
 
 	if err != nil {
 		Goback(w, r, err)
@@ -302,29 +191,29 @@ func (c *appContext) registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userId, _ := redis.Int(c.conn.Do("INCR", "next_user_id"))
+	userId, _ := redis.Int(redisConn.Do("INCR", "next_user_id"))
 
 	auth := securecookie.GenerateRandomKey(32)
 
 	tableName := "user:" + strconv.Itoa(userId)
 
-	userInfo := User{strconv.Itoa(userId), userName, password, string(auth)}
+	userInfo := User{UserId: strconv.Itoa(userId), UserName: userName, Password: password, Auth: string(auth)}
 
-	_, err = c.conn.Do("HMSET", redis.Args{}.Add(tableName).AddFlat(&userInfo)...)
+	_, err = redisConn.Do("HMSET", redis.Args{}.Add(tableName).AddFlat(&userInfo)...)
 	if err != nil {
 		Goback(w, r, err)
 
 		return
 	}
 
-	_, err = c.conn.Do("HSET", "users", userName, userId)
+	_, err = redisConn.Do("HSET", "users", userName, userId)
 
 	if err != nil {
 		Goback(w, r, err)
 		return
 	}
 
-	_, err = c.conn.Do("HSET", "auths", auth, userId)
+	_, err = redisConn.Do("HSET", "auths", auth, userId)
 
 	if err != nil {
 		Goback(w, r, err)
@@ -332,7 +221,7 @@ func (c *appContext) registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = c.conn.Do("ZADD", "users_by_time", time.Now().Unix(), userName)
+	_, err = redisConn.Do("ZADD", "users_by_time", time.Now().Unix(), userName)
 
 	if err != nil {
 		Goback(w, r, err)
@@ -347,16 +236,22 @@ func (c *appContext) registerHandler(w http.ResponseWriter, r *http.Request) {
 	tmplRender.HTML(w, http.StatusOK, "register", templateParams)
 }
 
-func (c *appContext) loginHandler(w http.ResponseWriter, r *http.Request) {
+func loginHandler(w http.ResponseWriter, r *http.Request) {
 	userName := r.PostFormValue("username")
-	password := r.PostFormValue("password")
+
+	password, err := encryptedPassword(r.PostFormValue("password"))
+	if err != nil {
+		Goback(w, r, err)
+		return
+	}
+
 	if userName == "" || password == "" {
 		Goback(w, r, errors.New("You need to enter both username and password to login.!"))
 
 		return
 	}
 
-	userExistId, err := c.conn.Do("HGET", "users", userName)
+	userExistId, err := redisConn.Do("HGET", "users", userName)
 
 	if err != nil {
 		Goback(w, r, err)
@@ -370,9 +265,9 @@ func (c *appContext) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userId, _ := redis.Int(c.conn.Do("HGET", "users", userName))
+	userId, _ := redis.Int(redisConn.Do("HGET", "users", userName))
 	tableName := "user:" + strconv.Itoa(userId)
-	realPassword, _ := redis.String(c.conn.Do("hget", tableName, "password"))
+	realPassword, _ := redis.String(redisConn.Do("hget", tableName, "password"))
 
 	if realPassword != password {
 
@@ -381,7 +276,7 @@ func (c *appContext) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth, err := redis.String(c.conn.Do("hget", tableName, "auth"))
+	auth, err := redis.String(redisConn.Do("hget", tableName, "auth"))
 
 	if err != nil {
 		Goback(w, r, err)
@@ -392,15 +287,12 @@ func (c *appContext) loginHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-func (c *appContext) indexHandler(w http.ResponseWriter, r *http.Request) {
+func indexHandler(w http.ResponseWriter, r *http.Request) {
 
 	//	tmplRender.HTML(w, http.StatusOK, "welcome", nil)
+	user := context.Get(r, "user")
 
-	auth := getAuth(r)
-
-	_, err := c.helper.userFromAuth(auth)
-
-	if err != nil {
+	if user == nil {
 		tmplRender.HTML(w, http.StatusOK, "welcome", nil)
 
 	} else {
@@ -408,13 +300,14 @@ func (c *appContext) indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 }
-func (c *appContext) homeHandler(w http.ResponseWriter, r *http.Request) {
-	auth := getAuth(r)
-	user, err := c.helper.userFromAuth(auth)
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+	helper := DBHelper{}
+	user := context.Get(r, "user").(*User)
 	templateParams := map[string]interface{}{}
 	templateParams["user"] = user
 
 	var start int64
+	var err error
 	if "" == r.FormValue("start") {
 		start = int64(0)
 	} else {
@@ -425,9 +318,9 @@ func (c *appContext) homeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	posts, rest, err := c.helper.getUserPosts(user.UserId, start, 10)
+	posts, rest := helper.getUserPosts(user.UserId, start, 10)
 
-	if err == nil {
+	if helper.err == nil {
 
 		templateParams["posts"] = posts
 
@@ -443,12 +336,10 @@ func (c *appContext) homeHandler(w http.ResponseWriter, r *http.Request) {
 	tmplRender.HTML(w, http.StatusOK, "home", templateParams)
 }
 
-func (c *appContext) postHandler(w http.ResponseWriter, r *http.Request) {
-
-	auth := getAuth(r)
-	user, err := c.helper.userFromAuth(auth)
-
-	if err != nil {
+func postHandler(w http.ResponseWriter, r *http.Request) {
+	helper := DBHelper{}
+	user := context.Get(r, "user").(*User)
+	if helper.err != nil {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
@@ -460,10 +351,10 @@ func (c *appContext) postHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = c.helper.post(user.UserId, status)
+	helper.post(user.UserId, status)
 
-	if err != nil {
-		Goback(w, r, err)
+	if helper.err != nil {
+		Goback(w, r, helper.err)
 		return
 	}
 
@@ -471,7 +362,8 @@ func (c *appContext) postHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func (c *appContext) profileHandler(w http.ResponseWriter, r *http.Request) {
+func profileHandler(w http.ResponseWriter, r *http.Request) {
+	helper := DBHelper{}
 	userName := r.FormValue("u")
 
 	if userName == "" {
@@ -479,27 +371,22 @@ func (c *appContext) profileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userOther, err := c.helper.getUserFromName(userName)
+	userOther := helper.getUserFromName(userName)
 
-	if err != nil {
-		Goback(w, r, err)
+	if helper.err != nil {
+		Goback(w, r, helper.err)
 		return
 	}
 
 	templateParams := map[string]interface{}{}
 	templateParams["profile"] = userOther
 
-	auth := getAuth(r)
-	userMe, err := c.helper.userFromAuth(auth)
-
-	if err != nil {
-		Goback(w, r, err)
-		return
-	}
+	userMe := context.Get(r, "user").(*User)
 
 	templateParams["user"] = userMe
 
 	var start int64
+	var err error
 	if "" == r.FormValue("start") {
 		start = int64(0)
 	} else {
@@ -510,9 +397,9 @@ func (c *appContext) profileHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	posts, rest, err := c.helper.getUserPosts(userOther.UserId, start, 10)
+	posts, rest := helper.getUserPosts(userOther.UserId, start, 10)
 
-	if err == nil {
+	if helper.err == nil {
 
 		templateParams["posts"] = posts
 
@@ -528,19 +415,20 @@ func (c *appContext) profileHandler(w http.ResponseWriter, r *http.Request) {
 	tmplRender.HTML(w, http.StatusOK, "profile", templateParams)
 }
 
-func (c *appContext) timelineHandler(w http.ResponseWriter, r *http.Request) {
+func timelineHandler(w http.ResponseWriter, r *http.Request) {
+	helper := DBHelper{}
 	templateParams := map[string]interface{}{}
-	users, err := c.helper.getLatestUsers()
+	users := helper.getLatestUsers()
 
-	if err != nil {
-		Goback(w, r, err)
+	if helper.err != nil {
+		Goback(w, r, helper.err)
 		return
 	}
 
-	posts, _, err := c.helper.getLatestTimeLine(0, 50)
+	posts, _ := helper.getLatestTimeLine(0, 50)
 
-	if err != nil {
-		Goback(w, r, err)
+	if helper.err != nil {
+		Goback(w, r, helper.err)
 		return
 	}
 	templateParams["users"] = users
@@ -548,7 +436,8 @@ func (c *appContext) timelineHandler(w http.ResponseWriter, r *http.Request) {
 
 	tmplRender.HTML(w, http.StatusOK, "timeline", templateParams)
 }
-func (c *appContext) followHandler(w http.ResponseWriter, r *http.Request) {
+func followHandler(w http.ResponseWriter, r *http.Request) {
+	helper := DBHelper{}
 
 	userId := r.FormValue("uid")
 
@@ -557,25 +446,24 @@ func (c *appContext) followHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth := getAuth(r)
-	userMe, err := c.helper.userFromAuth(auth)
+	userMe := context.Get(r, "user").(*User)
 
 	if userMe.UserId == userId {
 		Goback(w, r, errors.New("you can't follow yourself"))
 		return
 	}
 
-	err = userMe.Follow(&User{UserId: userId})
+	userMe.Follow(&User{UserId: userId})
 
-	if err != nil {
+	if userMe.err != nil {
 
-		Goback(w, r, err)
+		Goback(w, r, userMe.err)
 		return
 	}
 
-	profile, err := c.helper.loadUserInfo(userId)
-	if err != nil {
-		Goback(w, r, err)
+	profile := helper.loadUserInfo(userId)
+	if helper.err != nil {
+		Goback(w, r, helper.err)
 		return
 	}
 
@@ -583,7 +471,8 @@ func (c *appContext) followHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func (c *appContext) unfollowHandler(w http.ResponseWriter, r *http.Request) {
+func unfollowHandler(w http.ResponseWriter, r *http.Request) {
+	helper := DBHelper{}
 	userId := r.FormValue("uid")
 
 	if userId == "" {
@@ -591,24 +480,23 @@ func (c *appContext) unfollowHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth := getAuth(r)
-	userMe, err := c.helper.userFromAuth(auth)
+	userMe := context.Get(r, "user").(*User)
 
 	if userMe.UserId == userId {
 		Goback(w, r, errors.New("you can't follow yourself"))
 		return
 	}
 
-	err = userMe.UnFollow(&User{UserId: userId})
+	userMe.UnFollow(&User{UserId: userId})
 
-	if err != nil {
-		Goback(w, r, err)
+	if userMe.err != nil {
+		Goback(w, r, userMe.err)
 		return
 	}
 
-	profile, err := c.helper.loadUserInfo(userId)
-	if err != nil {
-		Goback(w, r, err)
+	profile := helper.loadUserInfo(userId)
+	if helper.err != nil {
+		Goback(w, r, helper.err)
 		return
 	}
 
@@ -616,42 +504,43 @@ func (c *appContext) unfollowHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func (c *appContext) logoutHandler(w http.ResponseWriter, r *http.Request) {
-	auth := getAuth(r)
-	userMe, err := c.helper.userFromAuth(auth)
-
-	if err != nil {
-		Goback(w, r, err)
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	helper := DBHelper{}
+	userMe := context.Get(r, "user").(*User)
+	if helper.err != nil {
+		Goback(w, r, helper.err)
 		return
 	}
 
 	newAuth := securecookie.GenerateRandomKey(32)
 
-	oldAuth, err := redis.String(c.conn.Do("HGET", "user:"+userMe.UserId, "auth"))
+	oldAuth, err := redis.String(redisConn.Do("HGET", "user:"+userMe.UserId, "auth"))
 
 	if err != nil {
 		Goback(w, r, err)
 		return
 	}
 
-	_, err = c.conn.Do("HSET", "user:"+userMe.UserId, "auth", newAuth)
+	_, err = redisConn.Do("HSET", "user:"+userMe.UserId, "auth", newAuth)
 	if err != nil {
 		Goback(w, r, err)
 		return
 	}
 
-	_, err = c.conn.Do("HSET", "auths", newAuth, userMe.UserId)
+	_, err = redisConn.Do("HSET", "auths", newAuth, userMe.UserId)
 	if err != nil {
 		Goback(w, r, err)
 		return
 	}
 
-	_, err = c.conn.Do("HDEL", "auths", oldAuth)
+	_, err = redisConn.Do("HDEL", "auths", oldAuth)
 	if err != nil {
 		Goback(w, r, err)
 		return
 	}
 
+	clearSession(w)
+	context.Delete(r, "user")
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -684,34 +573,25 @@ func wrapHandler(h http.Handler) httprouter.Handle {
 
 func main() {
 
-	var err error
-	redisConn, err = redis.Dial("tcp", "192.168.59.103:49153")
-
-	if err != nil {
-		panic(err)
-	}
-
 	defer redisConn.Close()
-
-	appC := appContext{redisConn, DBHelper{redisConn}}
 
 	satic := Static{http.Dir("public")}
 
-	commonHandler := alice.New(context.ClearHandler, loggingHandler, recoverHandler)
+	commonHandler := alice.New(context.ClearHandler, loggingHandler, recoverHandler, authHandler)
 
 	router := NewRouter()
 	router.NotFound = satic.saticHandler
 
-	router.Get("/", commonHandler.ThenFunc(appC.indexHandler))
-	router.Get("/home", commonHandler.ThenFunc(appC.homeHandler))
-	router.Post("/post", commonHandler.ThenFunc(appC.postHandler))
-	router.Post("/register", commonHandler.ThenFunc(appC.registerHandler))
-	router.Post("/login", commonHandler.ThenFunc(appC.loginHandler))
-	router.Get("/follow", commonHandler.ThenFunc(appC.followHandler))
-	router.Get("/unfollow", commonHandler.ThenFunc(appC.unfollowHandler))
-	router.Get("/Profile", commonHandler.ThenFunc(appC.profileHandler))
-	router.Get("/timeline", commonHandler.ThenFunc(appC.timelineHandler))
-	router.Get("/logout", commonHandler.ThenFunc(appC.logoutHandler))
+	router.Get("/", commonHandler.ThenFunc(indexHandler))
+	router.Get("/home", commonHandler.ThenFunc(homeHandler))
+	router.Post("/post", commonHandler.ThenFunc(postHandler))
+	router.Post("/register", commonHandler.ThenFunc(registerHandler))
+	router.Post("/login", commonHandler.ThenFunc(loginHandler))
+	router.Get("/follow", commonHandler.ThenFunc(followHandler))
+	router.Get("/unfollow", commonHandler.ThenFunc(unfollowHandler))
+	router.Get("/Profile", commonHandler.ThenFunc(profileHandler))
+	router.Get("/timeline", commonHandler.ThenFunc(timelineHandler))
+	router.Get("/logout", commonHandler.ThenFunc(logoutHandler))
 
 	http.ListenAndServe(":8000", router)
 }
