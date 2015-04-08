@@ -10,7 +10,6 @@ type User struct {
 	UserId   string `redis:"userId"`
 	UserName string `redis:"userName"`
 	Password string `redis:"password"`
-	Auth     string `redis:"auth"`
 	err      error
 }
 

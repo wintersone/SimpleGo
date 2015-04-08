@@ -34,5 +34,4 @@ func (s *Static) saticHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.ServeContent(w, r, file, fi.ModTime(), f)
-
 }

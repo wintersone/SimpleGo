@@ -1,56 +1,58 @@
 package main
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/dchest/scrypt"
-	"github.com/gorilla/securecookie"
-)
 
-var (
-	cookieHandler = securecookie.New(
-		[]byte("y@b(@+fab&^PFnG$yJ5%^5TWgJt3OigHYYcb!J6(2@$UUK1S@9iajQAAL2y4Ou*="),
-		[]byte("xKB(nJhIQvc(45%*ZO!#h0KjMW!VM=$!"))
+	"github.com/gorilla/sessions"
 )
 
 const (
-	cookieName = "auth"
-	cookieKey  = "auth"
-	saltKey    = "+acxKecey7bX3f$WwmLgku%m&+l#L0@S"
+	sessionName = "Auth"
+	userKey     = "UserId"
+	saltKey     = "+acxKecey7bX3f$WwmLgku%m&+l#L0@S"
 )
 
-func getAuth(r *http.Request) (auth string) {
-	if cookie, err := r.Cookie(cookieName); err == nil {
-		cookieValue := make(map[string]string)
-		if err = cookieHandler.Decode(cookieName, cookie.Value, &cookieValue); err == nil {
-			auth = cookieValue[cookieKey]
-		}
+func getUser(r *http.Request) (userId string) {
+	session, err := redisStore.Get(r, sessionName)
+	if err != nil {
+		log.Printf("err in get session %v", err)
 	}
-	return auth
+
+	if session.Values[userKey] == nil {
+		return ""
+	}
+	return session.Values[userKey].(string)
 }
 
-func setSession(auth string, w http.ResponseWriter) {
-	value := map[string]string{
-		cookieKey: auth,
+func setSession(auth string, r *http.Request, w http.ResponseWriter) {
+	session, err := redisStore.Get(r, sessionName)
+	if err != nil {
+		log.Printf("err in get session %v", err)
 	}
-	if encoded, err := cookieHandler.Encode(cookieName, value); err == nil {
-		cookie := &http.Cookie{
-			Name:  cookieName,
-			Value: encoded,
-			Path:  "/",
-		}
-		http.SetCookie(w, cookie)
-	}
+
+	session.Values[userKey] = auth
+
+	saveSession(r, w)
 }
 
-func clearSession(w http.ResponseWriter) {
-	cookie := &http.Cookie{
-		Name:   cookieName,
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
+func clearSession(r *http.Request, w http.ResponseWriter) {
+	session, err := redisStore.Get(r, sessionName)
+	if err != nil {
+		log.Printf("err in get session %v", err)
 	}
-	http.SetCookie(w, cookie)
+
+	session.Options.MaxAge = -1
+
+	saveSession(r, w)
+}
+
+func saveSession(r *http.Request, w http.ResponseWriter) {
+	if err := sessions.Save(r, w); err != nil {
+		log.Printf("err in get session %v", err)
+	}
 }
 
 func encryptedPassword(password string) (string, error) {

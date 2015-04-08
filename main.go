@@ -13,10 +13,10 @@ import (
 
 	"github.com/garyburd/redigo/redis"
 	"github.com/gorilla/context"
-	"github.com/gorilla/securecookie"
 	"github.com/julienschmidt/httprouter"
 	"github.com/justinas/alice"
 	"github.com/unrolled/render"
+	"gopkg.in/boj/redistore.v1"
 )
 
 //Errors
@@ -89,13 +89,13 @@ func recoverHandler(next http.Handler) http.Handler {
 func authHandler(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request) {
 		helper := DBHelper{}
-		auth := getAuth(r)
-		user := helper.userFromAuth(auth)
-		if helper.err == nil {
-			log.Printf("user is %@", user.UserName)
-			context.Set(r, "user", user)
+		userId := getUser(r)
+		if userId != "" {
+			user := helper.loadUserInfo(userId)
+			if helper.err == nil {
+				context.Set(r, "user", user)
+			}
 		}
-		log.Printf("error is %@", helper.err)
 		next.ServeHTTP(w, r)
 	}
 
@@ -197,11 +197,9 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 
 	userId, _ := redis.Int(redisConn.Do("INCR", "next_user_id"))
 
-	auth := securecookie.GenerateRandomKey(32)
-
 	tableName := "user:" + strconv.Itoa(userId)
 
-	userInfo := User{UserId: strconv.Itoa(userId), UserName: userName, Password: password, Auth: string(auth)}
+	userInfo := User{UserId: strconv.Itoa(userId), UserName: userName, Password: password}
 
 	_, err = redisConn.Do("HMSET", redis.Args{}.Add(tableName).AddFlat(&userInfo)...)
 	if err != nil {
@@ -217,14 +215,6 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = redisConn.Do("HSET", "auths", auth, userId)
-
-	if err != nil {
-		Goback(w, r, err)
-
-		return
-	}
-
 	_, err = redisConn.Do("ZADD", "users_by_time", time.Now().Unix(), userName)
 
 	if err != nil {
@@ -233,7 +223,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setSession(string(auth), w)
+	setSession(strconv.Itoa(userId), r, w)
 
 	templateParams := map[string]interface{}{}
 	templateParams["username"] = userName
@@ -283,14 +273,12 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth, err := redis.String(redisConn.Do("hget", tableName, "auth"))
-
 	if err != nil {
 		Goback(w, r, err)
 		return
 	}
 
-	setSession(auth, w)
+	setSession(strconv.Itoa(userId), r, w)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -513,44 +501,7 @@ func unfollowHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
-	redisConn := redisPool.Get()
-	defer redisConn.Close()
-
-	helper := DBHelper{}
-	userMe := context.Get(r, "user").(*User)
-	if helper.err != nil {
-		Goback(w, r, helper.err)
-		return
-	}
-
-	newAuth := securecookie.GenerateRandomKey(32)
-
-	oldAuth, err := redis.String(redisConn.Do("HGET", "user:"+userMe.UserId, "auth"))
-
-	if err != nil {
-		Goback(w, r, err)
-		return
-	}
-
-	_, err = redisConn.Do("HSET", "user:"+userMe.UserId, "auth", newAuth)
-	if err != nil {
-		Goback(w, r, err)
-		return
-	}
-
-	_, err = redisConn.Do("HSET", "auths", newAuth, userMe.UserId)
-	if err != nil {
-		Goback(w, r, err)
-		return
-	}
-
-	_, err = redisConn.Do("HDEL", "auths", oldAuth)
-	if err != nil {
-		Goback(w, r, err)
-		return
-	}
-
-	clearSession(w)
+	clearSession(r, w)
 	context.Delete(r, "user")
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -584,6 +535,7 @@ func wrapHandler(h http.Handler) httprouter.Handle {
 
 var (
 	redisPool   *redis.Pool
+	redisStore  *redistore.RediStore
 	redisServer = flag.String("redisServer", "192.168.59.103:49153", "")
 )
 
@@ -592,6 +544,9 @@ func main() {
 	flag.Parse()
 	redisPool = NewPool(*redisServer)
 	defer redisPool.Close()
+
+	redisStore = NewRedisStore(redisPool)
+	defer redisStore.Close()
 
 	satic := Static{http.Dir("public")}
 

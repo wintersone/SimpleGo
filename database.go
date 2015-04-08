@@ -5,6 +5,12 @@ import (
 	"time"
 
 	"github.com/garyburd/redigo/redis"
+	"gopkg.in/boj/redistore.v1"
+)
+
+var (
+	authKey    = []byte("y@b(@+fab&^PFnG$yJ5%^5TWgJt3OigHYYcb!J6(2@$UUK1S@9iajQAAL2y4Ou*=")
+	encryptKey = []byte("xKB(nJhIQvc(45%*ZO!#h0KjMW!VM=$!")
 )
 
 func NewPool(server string) *redis.Pool {
@@ -25,4 +31,13 @@ func NewPool(server string) *redis.Pool {
 			return err
 		},
 	}
+}
+
+func NewRedisStore(pool *redis.Pool) *redistore.RediStore {
+	redisStore, err := redistore.NewRediStoreWithPool(pool, authKey, encryptKey)
+	if err != nil {
+		log.Fatal("err in init redis store")
+		return nil
+	}
+	return redisStore
 }

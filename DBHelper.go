@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,30 +11,6 @@ import (
 
 type DBHelper struct {
 	err error
-}
-
-func (helper *DBHelper) userFromAuth(auth string) *User {
-
-	redisConn := redisPool.Get()
-	defer redisConn.Close()
-
-	if auth == "" {
-		helper.err = errors.New("No Authentication")
-		return nil
-	}
-
-	var userId, authSaved string
-
-	userId, helper.err = redis.String(redisConn.Do("HGET", "auths", auth))
-
-	authSaved, helper.err = redis.String(redisConn.Do("HGET", "user:"+userId, "auth"))
-
-	if authSaved != auth {
-		helper.err = errors.New("invalid auth")
-		return nil
-	}
-
-	return helper.loadUserInfo(userId)
 }
 
 func (helper *DBHelper) loadUserInfo(userId string) *User {
