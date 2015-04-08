@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"log"
 	"net/http"
 	"reflect"
@@ -158,6 +159,9 @@ type Post struct {
 // Main Handlers
 
 func registerHandler(w http.ResponseWriter, r *http.Request) {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	userName := r.PostFormValue("username")
 	password := r.PostFormValue("password")
 
@@ -237,6 +241,9 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	userName := r.PostFormValue("username")
 
 	password, err := encryptedPassword(r.PostFormValue("password"))
@@ -301,6 +308,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 func homeHandler(w http.ResponseWriter, r *http.Request) {
+
 	helper := DBHelper{}
 	user := context.Get(r, "user").(*User)
 	templateParams := map[string]interface{}{}
@@ -505,6 +513,9 @@ func unfollowHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	helper := DBHelper{}
 	userMe := context.Get(r, "user").(*User)
 	if helper.err != nil {
@@ -571,9 +582,16 @@ func wrapHandler(h http.Handler) httprouter.Handle {
 	}
 }
 
+var (
+	redisPool   *redis.Pool
+	redisServer = flag.String("redisServer", "192.168.59.103:49153", "")
+)
+
 func main() {
 
-	defer redisConn.Close()
+	flag.Parse()
+	redisPool = NewPool(*redisServer)
+	defer redisPool.Close()
 
 	satic := Static{http.Dir("public")}
 

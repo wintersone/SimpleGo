@@ -16,12 +16,16 @@ type DBHelper struct {
 
 func (helper *DBHelper) userFromAuth(auth string) *User {
 
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	if auth == "" {
 		helper.err = errors.New("No Authentication")
 		return nil
 	}
 
 	var userId, authSaved string
+
 	userId, helper.err = redis.String(redisConn.Do("HGET", "auths", auth))
 
 	authSaved, helper.err = redis.String(redisConn.Do("HGET", "user:"+userId, "auth"))
@@ -35,6 +39,9 @@ func (helper *DBHelper) userFromAuth(auth string) *User {
 }
 
 func (helper *DBHelper) loadUserInfo(userId string) *User {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	var value []interface{}
 	value, helper.err = redis.Values(redisConn.Do("HGETALL", "user:"+userId))
 	user := &User{}
@@ -46,6 +53,8 @@ func (helper *DBHelper) loadUserInfo(userId string) *User {
 }
 
 func (helper *DBHelper) getUserFromName(userName string) *User {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
 
 	var value string
 	value, helper.err = redis.String(redisConn.Do("HGET", "users", userName))
@@ -54,6 +63,8 @@ func (helper *DBHelper) getUserFromName(userName string) *User {
 }
 
 func (helper *DBHelper) getPost(postId string) *Post {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
 
 	var values []interface{}
 	values, helper.err = redis.Values(redisConn.Do("HGETALL", "post:"+postId))
@@ -65,6 +76,9 @@ func (helper *DBHelper) getPost(postId string) *Post {
 }
 
 func (helper *DBHelper) getUserPosts(userId string, start int64, count int64) ([]*Post, int64) {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	var (
 		values []string
 		length int64
@@ -88,6 +102,9 @@ func (helper *DBHelper) getUserPosts(userId string, start int64, count int64) ([
 }
 
 func (helper *DBHelper) getFollowers(userId string) int {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	var count int
 	count, helper.err = redis.Int(redisConn.Do("ZCARD", "followers:"+userId))
 	if helper.err != nil {
@@ -99,6 +116,9 @@ func (helper *DBHelper) getFollowers(userId string) int {
 }
 
 func (helper *DBHelper) getFollowing(userId string) int {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	var count int
 	count, helper.err = redis.Int(redisConn.Do("ZCARD", "following:"+userId))
 
@@ -111,6 +131,9 @@ func (helper *DBHelper) getFollowing(userId string) int {
 }
 
 func (helper *DBHelper) post(userId string, body string) {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	var (
 		postId    int
 		userName  string
@@ -133,6 +156,9 @@ func (helper *DBHelper) post(userId string, body string) {
 }
 
 func (helper *DBHelper) getLatestUsers() []*User {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	var (
 		values []string
 		users  = []*User{}
@@ -146,6 +172,9 @@ func (helper *DBHelper) getLatestUsers() []*User {
 	return users
 }
 func (helper *DBHelper) getLatestTimeLine(start int64, count int64) ([]*Post, int64) {
+	redisConn := redisPool.Get()
+	defer redisConn.Close()
+
 	var (
 		values []string
 		posts  = []*Post{}

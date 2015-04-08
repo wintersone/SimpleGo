@@ -27,6 +27,9 @@ func (u *User) IsEqual(user *User) bool {
 }
 
 func (u *User) IsFollowing(user *User) bool {
+	redisConn := redisPool.Get()
+	redisConn.Close()
+
 	var v int
 	v, u.err = redis.Int(redisConn.Do("ZSCORE", "following:"+u.UserId, user.UserId))
 	if u.err != nil {
@@ -41,6 +44,9 @@ func (u *User) IsFollowing(user *User) bool {
 }
 
 func (u *User) GetFollowers() int {
+	redisConn := redisPool.Get()
+	redisConn.Close()
+
 	var count int
 	count, u.err = redis.Int(redisConn.Do("ZCARD", "followers:"+u.UserId))
 
@@ -53,6 +59,10 @@ func (u *User) GetFollowers() int {
 }
 
 func (u *User) GetFollowing() int {
+
+	redisConn := redisPool.Get()
+	redisConn.Close()
+
 	var count int
 	count, u.err = redis.Int(redisConn.Do("ZCARD", "following:"+u.UserId))
 
@@ -64,11 +74,17 @@ func (u *User) GetFollowing() int {
 }
 
 func (u *User) Follow(user *User) {
+	redisConn := redisPool.Get()
+	redisConn.Close()
+
 	_, u.err = redisConn.Do("ZADD", "following:"+u.UserId, time.Now().Unix(), user.UserId)
 	_, u.err = redisConn.Do("ZADD", "followers:"+user.UserId, time.Now().Unix(), u.UserId)
 }
 
 func (u *User) UnFollow(user *User) {
+	redisConn := redisPool.Get()
+	redisConn.Close()
+
 	_, u.err = redisConn.Do("ZREM", "following:"+u.UserId, user.UserId)
 	_, u.err = redisConn.Do("ZREM", "followers:"+user.UserId, u.UserId)
 
